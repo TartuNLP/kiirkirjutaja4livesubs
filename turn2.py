@@ -1,6 +1,6 @@
-from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
+# from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
 from OnlineSpeakerChangeDetector.online_scd.streaming import StreamingDecoder
-from vad import SpeechSegment
+from kiirkirjutaja.vad2 import SpeechSegment
 from queue import Queue
 import torch
 import threading
@@ -57,9 +57,3 @@ class TurnGenerator:
             chunk_queue.put(None)
             self.speech_segment_queue.put(None)
             logging.debug("Ending turn detector for this speech segment")
-
-
-
-
-
-

@@ -13,14 +13,14 @@ COPY models /opt/models
 
 RUN echo '2022-01-31_16:24' >/dev/null
 
-RUN git clone https://github.com/alumae/online_speaker_change_detector.git /opt/online-speaker-change-detector
+RUN git clone https://github.com/alumae/online_speaker_change_detector.git /opt/OnlineSpeakerChangeDetector
 
 RUN mkdir /opt/kiirkirjutaja \
     && cd /opt/kiirkirjutaja && ln -s ../models
     
 COPY *.py /opt/kiirkirjutaja/
 
-ENV PYTHONPATH="/opt/online-speaker-change-detector"
+ENV PYTHONPATH="/opt/OnlineSpeakerChangeDetector"
 
 WORKDIR /opt/kiirkirjutaja
 

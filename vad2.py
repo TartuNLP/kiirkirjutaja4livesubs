@@ -1,14 +1,12 @@
-import sys
-import torch
-import torch.nn.functional as F
-from itertools import repeat
-from collections import deque
-from queue import Queue
-import threading
-import logging
-import numpy as np
 import ray
-import subprocess
+import time
+import torch.nn.functional as F
+import torch
+import numpy as np
+import threading
+
+from queue import Queue
+from collections import deque
 
 
 # Based on https://github.com/snakers4/silero-vad/blob/master/utils_vad.py
@@ -22,7 +20,7 @@ class VADiterator:
         self.num_samples = num_samples_per_window
         self.num_steps = num_steps
         assert self.num_samples % num_steps == 0
-        self.step = int(self.num_samples / num_steps)  # 500 samples is good enough
+        self.step = int(self.num_samples / num_steps)   # 500 samples is good enough
         self.prev = torch.zeros(self.num_samples)
         self.last = False
         self.triggered = False
@@ -108,7 +106,7 @@ class VadModelWrapper():
 
 
 class SpeechSegmentGenerator:
-    def __init__(self, input_file):
+    def __init__(self, input_stream):
         trig_sum = 0.16
         neg_trig_sum = 0.01
         self.num_steps = 8
@@ -117,18 +115,13 @@ class SpeechSegmentGenerator:
         self.vad_iter = VADiterator()
         self.speech_segment_queue = Queue(10)
 
-        logging.info(f"Starting streaming from {input_file}")
-        if input_file == "-":
-            self.stream = sys.stdin.buffer
-        else:
-            self.stream = subprocess.Popen(['ffmpeg', '-loglevel', 'quiet', '-i',
-                                            input_file,
-                                            '-ar', '16000', '-ac', '1', '-f', 's16le', '-'],
-                                           stdout=subprocess.PIPE).stdout
+        # Read input from whatever buffer is provided
+        self.stream = input_stream
+        self.flag = threading.Event()
 
-        thread = threading.Thread(target=self.run)
-        thread.daemon = True
-        thread.start()
+        self.thread = threading.Thread(target=self.run)
+        self.thread.daemon = True
+        self.thread.start()
 
     def speech_segments(self):
         while True:
@@ -139,7 +132,6 @@ class SpeechSegmentGenerator:
                 return
 
     def run(self):
-
         sample_pos = 0
         chunk_queue = None
         # we'll start sending chunks 8 frames before speech is actually detected
@@ -148,17 +140,18 @@ class SpeechSegmentGenerator:
 
         while True:
             bytes = self.stream.read(self.num_samples_per_window * 2)
-
             chunk = np.frombuffer(bytes, dtype=np.int16).astype(np.float32) / torch.iinfo(torch.int16).max
 
             if len(chunk) == 0:
-                break
+                if self.flag.is_set():
+                    break
+                else:
+                    time.sleep(1)
+                    continue
             chunk = torch.from_numpy(chunk)
 
             batch = self.vad_iter.prepare_batch(chunk)
             with torch.no_grad():
-                # vad_outs = self.model(batch)
-
                 vad_outs = ray.get(self.model_wrapper.forward.remote(batch))
 
             change_points = self.vad_iter.state(vad_outs)
@@ -168,8 +161,7 @@ class SpeechSegmentGenerator:
                 if current_frame in change_points:
                     if change_points[current_frame] == 'start':
                         chunk_queue = Queue(100)
-                        speech_segment = SpeechSegment(
-                            sample_pos + (j - len(speech_rewind_buffer)) * self.vad_iter.step, chunk_queue)
+                        speech_segment = SpeechSegment(sample_pos + (j - len(speech_rewind_buffer)) * self.vad_iter.step, chunk_queue)
                         self.speech_segment_queue.put(speech_segment)
                         for rewind_chunk in speech_rewind_buffer:
                             chunk_queue.put(rewind_chunk)
@@ -186,3 +178,4 @@ class SpeechSegmentGenerator:
         if chunk_queue is not None:
             chunk_queue.put(None)
         self.speech_segment_queue.put(None)
+        # print("speech_segment_generator exiting...")

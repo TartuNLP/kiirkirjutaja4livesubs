@@ -1,4 +1,5 @@
 import sys
+sys.path.append('..')
 import argparse
 import logging
 message_format = "%(asctime)s - %(levelname)s - %(message)s"
@@ -19,7 +20,7 @@ from vad import SpeechSegmentGenerator
 from turn import TurnGenerator
 from asr import TurnDecoder
 from lid import LanguageFilter
-from online_scd.model import SCDModel
+from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
 #import vosk
 #from unk_decoder import UnkDecoder
 #from compound import CompoundReconstructor
@@ -123,7 +124,9 @@ def main(args):
                         else:
                             presenter.partial_result(processed_res["result"])
             presenter.segment_end()   
-            gc.collect()   
+            gc.collect()
+            print("wtf")
+        print("main_loop exiting...")
 
     main_loop()        
 
