@@ -1,5 +1,6 @@
 import logging
 import sys
+import time
 
 message_format = "%(asctime)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=message_format, stream=sys.stderr, level=logging.INFO)
@@ -108,6 +109,7 @@ def main_loop(speech_segment_generator):
 
 @app.websocket("/")
 async def main2(websocket: WebSocket):
+    models["presenter"].event_scheduler.start()
     input_stream = Stream(b'')
 
     await websocket.accept()
@@ -122,10 +124,10 @@ async def main2(websocket: WebSocket):
     finishing_up = False
     try:
         while True:
-            if not finishing_up:
-                if output_stream.buffer.strip() != '':
-                    await websocket.send_json(output_stream.read())
+            if output_stream.buffer.strip() != '':
+                await websocket.send_json(output_stream.read())
 
+            if not finishing_up:
                 recv = await websocket.receive()
                 # print("Received: \n", recv)
                 if recv['type'] == 'websocket.disconnect':
@@ -133,13 +135,19 @@ async def main2(websocket: WebSocket):
                 elif 'bytes' in recv.keys():
                     input_stream.write(recv['bytes'])
                 elif 'text' in recv.keys() and recv['text'] == 'Done':
+                    finishing_up = True
                     speech_segment_generator.flag.set()
                     speech_segment_generator.thread.join()
                     transcription_thread.join()
+                    # The presenter cannot be restarted with each connection,
+                    # so just wait for it to finish sending data
+                    time.sleep(5)
             elif output_stream.buffer:
                 await websocket.send_json(output_stream.read())
             else:
+                print("Closing socket...")
                 await websocket.close()
+                print("Socket closed!")
                 break
     except WebSocketDisconnect:
         speech_segment_generator.flag.set()
