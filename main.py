@@ -125,8 +125,6 @@ def main(args):
                             presenter.partial_result(processed_res["result"])
             presenter.segment_end()   
             gc.collect()
-            print("wtf")
-        print("main_loop exiting...")
 
     main_loop()        
 
