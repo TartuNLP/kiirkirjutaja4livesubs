@@ -107,6 +107,20 @@ def main_loop(speech_segment_generator):
     # print("main_loop exiting...")
 
 
+# Instead of sending out strings with line breaks in the middle,
+# split them to separate substrings without removing the line breaks.
+# This simplifies client-side processing.
+async def send_from_stream(websocket, stream_output):
+    # This will add a line break to the last substring even if it didn't originally have one!
+    # for string in [i+"\n" for i in stream_output.split("\n") if i != ""]:
+    # Also, it helps to split on full stops
+    # (e.g. "sentenceEndingWord. SentenceStartingWord" -> "sentenceEndingWord." & " SentenceStartingWord").
+    # Thus, a more complex solution is needed instead:
+    substrings = stream_output.replace(". ", ".\n ").split("\n")
+    for string in [j for j in [i+"\n" for i in substrings[:-1]] + [substrings[-1]] if j != ""]:
+        await websocket.send_json(string)
+
+
 @app.websocket("/")
 async def main2(websocket: WebSocket):
     models["presenter"].event_scheduler.start()
@@ -125,7 +139,8 @@ async def main2(websocket: WebSocket):
     try:
         while True:
             if output_stream.buffer.strip() != '':
-                await websocket.send_json(output_stream.read())
+                await send_from_stream(websocket, output_stream.read())
+                # await websocket.send_json(output_stream.read())
 
             if not finishing_up:
                 recv = await websocket.receive()
@@ -143,7 +158,8 @@ async def main2(websocket: WebSocket):
                     # so just wait for it to finish sending data
                     time.sleep(5)
             elif output_stream.buffer:
-                await websocket.send_json(output_stream.read())
+                await send_from_stream(websocket, output_stream.read())
+                # await websocket.send_json(output_stream.read())
             else:
                 print("Closing socket...")
                 await websocket.close()
