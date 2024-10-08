@@ -1,52 +1,39 @@
-import sys
-sys.path.append('..')
-import argparse
 import logging
+import sys
+import time
+
 message_format = "%(asctime)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=message_format, stream=sys.stderr, level=logging.INFO)
 
-import time
-import argparse
-import re
 import ray
-import torch
 import sherpa_onnx
 
 # Needed for loading the speaker change detection model
 from pytorch_lightning.utilities import argparse_utils
+
 setattr(argparse_utils, "_gpus_arg_default", lambda x: 0)
 
-from vad import SpeechSegmentGenerator
-from turn import TurnGenerator
-from asr import TurnDecoder
-from lid import LanguageFilter
+from kiirkirjutaja.asr import TurnDecoder
+from kiirkirjutaja.lid import LanguageFilter
+from kiirkirjutaja.vad import SpeechSegmentGenerator
+from kiirkirjutaja.turn import TurnGenerator
+from kiirkirjutaja.presenters import WordByWordPresenter
 from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
-#import vosk
-#from unk_decoder import UnkDecoder
-#from compound import CompoundReconstructor
-#from words2numbers import Words2Numbers
-#from punctuate import Punctuate
-from confidence import confidence_filter
-from presenters import *
-import utils
+
 import gc
-import tracemalloc
-#date_strftime_format = "%y-%b-%d %H:%M:%S"
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from threading import Thread
+from contextlib import asynccontextmanager
+from kiirkirjutaja.bytestream import Stream
 
 
-ray.init(num_cpus=4) 
+ray.init(num_cpus=4)
 
-#RemotePunctuate = ray.remote(Punctuate)
-#RemoteWords2Numbers = ray.remote(Words2Numbers)
-
-#unk_decoder = UnkDecoder()
-#compound_reconstructor = CompoundReconstructor()
-#remote_words2numbers = RemoteWords2Numbers.remote()
-#remote_punctuate = RemotePunctuate.remote("models/punctuator/checkpoints/best.ckpt", "models/punctuator/tokenizer.json")
+models = {}
 
 
 def process_result(result):
-    #result = unk_decoder.post_process(result)    
     text = ""
     if "result" in result:
         result_words = []
@@ -56,91 +43,129 @@ def process_result(result):
             else:
                 result_words.append(word)
         result["result"] = result_words
-        #text = " ".join([wi["word"] for wi in result["result"]])
-
-        #text = compound_reconstructor.post_process(text)
-        #text = ray.get(remote_words2numbers.post_process.remote(text))
-        #text = ray.get(remote_punctuate.post_process.remote(text))           
-        #result = utils.reconstruct_full_result(result, text)
-        #result = confidence_filter(result)
         return result
     else:
         return result
 
-def main(args):
-    
-    if args.youtube_caption_url is not None:
-        presenter = YoutubeLivePresenter(captions_url=args.youtube_caption_url)
-    elif args.fab_speechinterface_url is not None:
-        presenter = FabLiveWordByWordPresenter(fab_speech_iterface_url=args.fab_speechinterface_url)
-    elif args.fab_bcast_url is not None:
-        presenter = FabBcastWordByWordPresenter(fab_bcast_url=args.fab_bcast_url)
-    elif args.zoom_caption_url is not None:
-        presenter = ZoomPresenter(captions_url=args.zoom_caption_url)
-    else:
-        presenter = WordByWordPresenter(args.word_output_file, word_delay_secs=args.word_output_delay)
-        #presenter = TerminalPresenter()
-    
-    scd_model = SCDModel.load_from_checkpoint("models/online-speaker-change-detector/checkpoints/epoch=102.ckpt")
-    sherpa_model = sherpa_onnx.OnlineRecognizer(
-            tokens="models/sherpa/tokens.txt",
-            encoder="models/sherpa/encoder.onnx",
-            decoder="models/sherpa/decoder.onnx",
-            joiner="models/sherpa/joiner.onnx",
-            num_threads=2,
-            sample_rate=16000,
-            feature_dim=80,
-            enable_endpoint_detection=True,
-            rule1_min_trailing_silence=5.0,
-            rule2_min_trailing_silence=2.0,
-            rule3_min_utterance_length=300,  
-            decoding_method="modified_beam_search",
-            max_feature_vectors=1000,  # 10 seconds
-        )
+
+# https://fastapi.tiangolo.com/advanced/events/#lifespan
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This is loaded here to allow a clean exit (see post-yield)
+    models["presenter"] = WordByWordPresenter(word_delay_secs=0.0)
+    # The rest is loaded here to reduce client spin-up time since the models are already ready-to-go
+    models["language_filter"] = LanguageFilter()
+    models["scd_model"] = SCDModel.load_from_checkpoint("models/online-speaker-change-detector/checkpoints/epoch=102.ckpt")
+    models["sherpa_model"] = sherpa_onnx.OnlineRecognizer(
+        tokens="models/sherpa/tokens.txt",
+        encoder="models/sherpa/encoder.onnx",
+        decoder="models/sherpa/decoder.onnx",
+        joiner="models/sherpa/joiner.onnx",
+        num_threads=2,
+        sample_rate=16000,
+        feature_dim=80,
+        enable_endpoint_detection=True,
+        rule1_min_trailing_silence=5.0,
+        rule2_min_trailing_silence=2.0,
+        rule3_min_utterance_length=300,
+        decoding_method="modified_beam_search",
+        max_feature_vectors=1000,  # 10 seconds
+    )
+    # This runs the rest of the program, everything after it is called on exit
+    yield
+    # This is needed for a clean exit
+    models["presenter"].event_scheduler.stop()
 
 
-    speech_segment_generator = SpeechSegmentGenerator(args.input_file)
-    language_filter = LanguageFilter()        
-    
-    def main_loop():
-        for speech_segment in speech_segment_generator.speech_segments():
-            presenter.segment_start()
-            
-            speech_segment_start_time = speech_segment.start_sample / 16000
+app = FastAPI(lifespan=lifespan)
 
-            turn_generator = TurnGenerator(scd_model, speech_segment)        
-            for i, turn in enumerate(turn_generator.turns()):
-                if i > 0:
-                    presenter.new_turn()
-                turn_start_time = (speech_segment.start_sample + turn.start_sample) / 16000                
-                
-                turn_decoder = TurnDecoder(sherpa_model, language_filter.filter(turn.chunks()))            
-                for res in turn_decoder.decode_results():
-                    if "result" in res:
-                        processed_res = process_result(res)
-                        #processed_res = res
-                        if res["final"]:
-                            presenter.final_result(processed_res["result"])
-                        else:
-                            presenter.partial_result(processed_res["result"])
-            presenter.segment_end()   
-            gc.collect()
 
-    main_loop()        
+def main_loop(speech_segment_generator):
 
-if __name__ == '__main__':
-    
+    for speech_segment in speech_segment_generator.speech_segments():
+        models["presenter"].segment_start()
 
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--youtube-caption-url', type=str)
-    parser.add_argument('--fab-speechinterface-url', type=str)
-    parser.add_argument('--fab-bcast-url', type=str)
-    parser.add_argument('--zoom-caption-url', type=str)
-    parser.add_argument('--word-output-file', type=argparse.FileType('w'), default=sys.stdout)
-    parser.add_argument('--word-output-delay', default=0.0, type=float, help="Words are not outputted before that many seconds have passed since their actual start")
-    parser.add_argument('input_file')
+        speech_segment_start_time = speech_segment.start_sample / 16000
 
-    args = parser.parse_args()
+        turn_generator = TurnGenerator(models["scd_model"], speech_segment)
+        for i, turn in enumerate(turn_generator.turns()):
+            if i > 0:
+                models["presenter"].new_turn()
+            turn_start_time = (speech_segment.start_sample + turn.start_sample) / 16000
 
-    main(args)
-    
+            turn_decoder = TurnDecoder(models["sherpa_model"], models["language_filter"].filter(turn.chunks()))
+            for res in turn_decoder.decode_results():
+                if "result" in res:
+                    processed_res = process_result(res)
+                    if res["final"]:
+                        models["presenter"].final_result(processed_res["result"])
+                    # TODO: What if we ignore partial results entirely? (do I understand this correctly?)
+                    else:
+                        models["presenter"].partial_result(processed_res["result"])
+        models["presenter"].segment_end()
+        gc.collect()
+    # print("main_loop exiting...")
+
+
+# Instead of sending out strings with line breaks in the middle,
+# split them to separate substrings without removing the line breaks.
+# This simplifies client-side processing.
+async def send_from_stream(websocket, stream_output):
+    # This will add a line break to the last substring even if it didn't originally have one!
+    # for string in [i+"\n" for i in stream_output.split("\n") if i != ""]:
+    # Also, it helps to split on full stops
+    # (e.g. "sentenceEndingWord. SentenceStartingWord" -> "sentenceEndingWord." & " SentenceStartingWord").
+    # Thus, a more complex solution is needed instead:
+    substrings = stream_output.replace(". ", ".\n ").split("\n")
+    for string in [j for j in [i+"\n" for i in substrings[:-1]] + [substrings[-1]] if j != ""]:
+        await websocket.send_json(string)
+
+
+@app.websocket("/")
+async def main(websocket: WebSocket):
+    models["presenter"].event_scheduler.start()
+    input_stream = Stream(b'')
+
+    await websocket.accept()
+    output_stream = Stream("")
+    models["presenter"].output_stream = output_stream
+
+    # TODO: Test the try-except loop (stop everything) for WebSocketDisconnects (e.g. browser refresh)
+    speech_segment_generator = SpeechSegmentGenerator(input_stream)
+    transcription_thread = Thread(target=main_loop, args=(speech_segment_generator,))
+    transcription_thread.start()
+
+    finishing_up = False
+    try:
+        while True:
+            if output_stream.buffer.strip() != '':
+                await send_from_stream(websocket, output_stream.read())
+                # await websocket.send_json(output_stream.read())
+
+            if not finishing_up:
+                recv = await websocket.receive()
+                # print("Received: \n", recv)
+                if recv['type'] == 'websocket.disconnect':
+                    raise WebSocketDisconnect
+                elif 'bytes' in recv.keys():
+                    input_stream.write(recv['bytes'])
+                elif 'text' in recv.keys() and recv['text'] == 'Done':
+                    finishing_up = True
+                    speech_segment_generator.flag.set()
+                    speech_segment_generator.thread.join()
+                    transcription_thread.join()
+                    # The presenter cannot be restarted with each connection,
+                    # so just wait for it to finish sending data
+                    time.sleep(5)
+            elif output_stream.buffer:
+                await send_from_stream(websocket, output_stream.read())
+                # await websocket.send_json(output_stream.read())
+            else:
+                print("Closing socket...")
+                await websocket.close()
+                print("Socket closed!")
+                break
+    except WebSocketDisconnect:
+        speech_segment_generator.flag.set()
+        speech_segment_generator.thread.join()
+        transcription_thread.join()
