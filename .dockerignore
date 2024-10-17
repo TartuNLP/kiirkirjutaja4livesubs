@@ -1,0 +1,5 @@
+.idea/
+.git/
+.gitignore
+kiirkirjutaja_env
+site-packages*/

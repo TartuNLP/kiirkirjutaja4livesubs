@@ -4,6 +4,9 @@ import logging
 import numpy as np
 import json
 
+logger = logging.getLogger("uvicorn")
+
+
 class LanguageFilter():
     def __init__(self, target_language="et", prior=0.50, alternative_targets=[]):
         self.target_language = target_language
@@ -22,17 +25,17 @@ class LanguageFilter():
         return softm
 
     def get_language(self, buffer):
-        logging.debug("Doing LID")
+        logger.debug("Doing LID")
         probs = self.get_language_probs(buffer)
-        logging.debug(f"Original prob for languge {self.target_language}: {probs[self.target_language_id]:.2f}")
+        logger.debug(f"Original prob for languge {self.target_language}: {probs[self.target_language_id]:.2f}")
         priors0 = torch.ones(len(probs), requires_grad=False) / len(probs)
         true_priors = (torch.ones(len(probs), requires_grad=False) - self.target_prior) / (len(probs) - 1)
         true_priors[self.target_language_id] = self.target_prior
         numerator = true_priors/priors0 * probs
         corrected_probs = numerator / numerator.sum()
-        logging.debug(f"Corrected prob for languge {self.target_language}: {corrected_probs[self.target_language_id]:.2f}")
+        logger.debug(f"Corrected prob for languge {self.target_language}: {corrected_probs[self.target_language_id]:.2f}")
         language_id = corrected_probs.argmax()
-        logging.debug(f"Detected language: {self.languages[language_id]}: {corrected_probs[language_id]:.2f}")
+        logger.debug(f"Detected language: {self.languages[language_id]}: {corrected_probs[language_id]:.2f}")
         return language_id
 
     def filter(self, chunk_generator):
@@ -53,7 +56,7 @@ class LanguageFilter():
                             buffering = False
                             del buffer
                         else:
-                            logging.info("Non-target language chunk? Waiting for more data to confirm...")
+                            logger.info("Non-target language chunk? Waiting for more data to confirm...")
 
                     elif (len(buffer) > self.lid_min_seconds_2 * 16000):
                         buffering = False
@@ -62,7 +65,7 @@ class LanguageFilter():
                             yield buffer    
                             del buffer
                         else:
-                            logging.info("Consuming non-target language speech turn...")
+                            logger.info("Consuming non-target language speech turn...")
                             del buffer
                             non_target_turn = True
                 else:
@@ -96,7 +99,7 @@ class LanguageFilter():
     #                         del buffer
     #                         buffering = False
     #                     else:
-    #                         logging.info("Non-target language chunk? Waiting for more data to confirm...")
+    #                         logger.info("Non-target language chunk? Waiting for more data to confirm...")
 
     #                 elif (len(buffer) > self.lid_min_seconds_2 * 16000):
     #                     buffering = False
@@ -105,7 +108,7 @@ class LanguageFilter():
     #                         yield buffer    
     #                         del buffer
     #                     else:
-    #                         logging.info("Consuming non-target language speech turn...")
+    #                         logger.info("Consuming non-target language speech turn...")
     #                         while True:
     #                             next(chunk_generator)
     #             else:

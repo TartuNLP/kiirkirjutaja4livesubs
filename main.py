@@ -2,7 +2,7 @@ import logging
 import sys
 import time
 
-message_format = "%(asctime)s - %(levelname)s - %(message)s"
+message_format = "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s"
 logging.basicConfig(format=message_format, stream=sys.stderr, level=logging.INFO)
 
 import ray
@@ -22,7 +22,7 @@ from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
 
 import gc
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from threading import Thread
 from contextlib import asynccontextmanager
 from kiirkirjutaja.bytestream import Stream
@@ -31,6 +31,8 @@ from kiirkirjutaja.bytestream import Stream
 ray.init(num_cpus=4)
 
 models = {}
+
+probe_variables = {"started": False, "ready": False}
 
 
 def process_result(result):
@@ -71,8 +73,12 @@ async def lifespan(app: FastAPI):
         decoding_method="modified_beam_search",
         max_feature_vectors=1000,  # 10 seconds
     )
+
+    probe_variables["started"] = True
+
     # This runs the rest of the program, everything after it is called on exit
     yield
+
     # This is needed for a clean exit
     models["presenter"].event_scheduler.stop()
 
@@ -120,9 +126,30 @@ async def send_from_stream(websocket, stream_output):
     for string in [j for j in [i+"\n" for i in substrings[:-1]] + [substrings[-1]] if j != ""]:
         await websocket.send_json(string)
 
+# Probe endpoints
+
+@app.get("/liveness")
+def liveness():
+    return status.HTTP_200_OK
+
+@app.get("/readiness")
+def readiness():
+    if probe_variables["ready"]:
+        return status.HTTP_200_OK
+    else:
+        return status.HTTP_503_SERVICE_UNAVAILABLE
+
+@app.get("/startup")
+def startup():
+    if probe_variables["started"]:
+        return status.HTTP_200_OK
+    else:
+        return status.HTTP_503_SERVICE_UNAVAILABLE
+
 
 @app.websocket("/")
 async def main(websocket: WebSocket):
+    probe_variables["ready"] = False
     models["presenter"].event_scheduler.start()
     input_stream = Stream(b'')
 
@@ -161,11 +188,11 @@ async def main(websocket: WebSocket):
                 await send_from_stream(websocket, output_stream.read())
                 # await websocket.send_json(output_stream.read())
             else:
-                print("Closing socket...")
                 await websocket.close()
-                print("Socket closed!")
+                probe_variables["ready"] = True
                 break
     except WebSocketDisconnect:
         speech_segment_generator.flag.set()
         speech_segment_generator.thread.join()
         transcription_thread.join()
+        probe_variables["ready"] = True

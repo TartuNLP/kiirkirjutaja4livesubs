@@ -4,6 +4,18 @@ from datetime import datetime
 from event_scheduler import EventScheduler
 
 
+class WordLogConstructor:
+    def __init__(self):
+        self.text = ""
+
+    def append(self, text):
+        self.text += text
+
+    def flush(self):
+        logging.getLogger("uvicorn").info(self.text)
+        self.text = ""
+
+
 class ResultPresenter:
 
     def partial_result(self, words):
@@ -98,13 +110,17 @@ class WordByWordPresenter(AbstractWordByWordPresenter):
     def __init__(self, word_delay_secs=3.0):
         super().__init__(word_delay_secs)
         self.output_stream = None
+        self.logger = WordLogConstructor()
 
     def _send_word_impl(self, word, num_sent_words, turn_start_time, is_final):
         if num_sent_words > 0 and word["word"][0] not in list(",.!?"):
-            print(" ", end="")
+            # print(" ", end="")
+            self.logger.append(" ")
             self.output_stream.write(" ")
-        print(word["word"], end="")
+        # print(word["word"], end="")
+        self.logger.append(word["word"])
         self.output_stream.write(word["word"])
         if is_final:
-            print("")
+            # print("")
+            self.logger.flush()
             self.output_stream.write("\n")
