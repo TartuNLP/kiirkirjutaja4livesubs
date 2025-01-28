@@ -129,18 +129,18 @@ async def send_from_stream(websocket, stream_output):
 # Probe endpoints
 
 @app.get("/liveness")
-def liveness():
+async def liveness():
     return status.HTTP_200_OK
 
 @app.get("/readiness")
-def readiness():
+async def readiness():
     if probe_variables["ready"]:
         return status.HTTP_200_OK
     else:
         return status.HTTP_503_SERVICE_UNAVAILABLE
 
 @app.get("/startup")
-def startup():
+async def startup():
     if probe_variables["started"]:
         return status.HTTP_200_OK
     else:
