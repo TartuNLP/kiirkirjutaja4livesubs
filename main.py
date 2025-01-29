@@ -22,7 +22,7 @@ from OnlineSpeakerChangeDetector.online_scd.model import SCDModel
 
 import gc
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status, HTTPException
 from threading import Thread
 from contextlib import asynccontextmanager
 from kiirkirjutaja.bytestream import Stream
@@ -75,6 +75,7 @@ async def lifespan(app: FastAPI):
     )
 
     probe_variables["started"] = True
+    probe_variables["ready"] = True
 
     # This runs the rest of the program, everything after it is called on exit
     yield
@@ -137,14 +138,18 @@ async def readiness():
     if probe_variables["ready"]:
         return status.HTTP_200_OK
     else:
-        return status.HTTP_503_SERVICE_UNAVAILABLE
+        # Doesn't work for Kubernetes
+        # return status.HTTP_503_SERVICE_UNAVAILABLE
+        raise HTTPException(status_code=503, detail="Not ready!")
 
 @app.get("/startup")
 async def startup():
     if probe_variables["started"]:
         return status.HTTP_200_OK
     else:
-        return status.HTTP_503_SERVICE_UNAVAILABLE
+        # Doesn't work for Kubernetes
+        # return status.HTTP_503_SERVICE_UNAVAILABLE
+        raise HTTPException(status_code=503, detail="Service busy!")
 
 
 @app.websocket("/")
